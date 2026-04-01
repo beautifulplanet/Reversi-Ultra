@@ -1,0 +1,15 @@
+{
+  "name": "reversi-engine",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "reversi_engine_bg.wasm",
+    "reversi_engine.js",
+    "reversi_engine.d.ts"
+  ],
+  "main": "reversi_engine.js",
+  "types": "reversi_engine.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
