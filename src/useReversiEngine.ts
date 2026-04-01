@@ -96,6 +96,10 @@ export function useReversiEngine(): ReversiEngine {
       setPhase('gameover');
       return;
     }
+
+    // Only proceed if it's actually the AI's turn (White = 2)
+    if (game.current_turn() !== 2) return;
+
     // Map difficulty 1-10 to depth 1-8
     const depth = Math.min(8, Math.max(1, Math.ceil(difficulty * 0.8)));
     setThinking(true);
@@ -113,12 +117,28 @@ export function useReversiEngine(): ReversiEngine {
         const s = syncState(move, flipped);
         if (s && s.isGameOver) {
           setPhase('gameover');
+          setThinking(false);
+          return;
+        }
+        // After AI moves, if human must pass (turn is still White), chain AI again
+        if (game.current_turn() === 2) {
+          setThinking(false);
+          setTimeout(() => doAiMove(), 300); // small delay so flip animation plays
+          return;
         }
       } else {
-        // AI passed — sync and check
+        // AI had no move (pass) — sync and check
         syncState(null, []);
         if (game.is_game_over()) {
           setPhase('gameover');
+          setThinking(false);
+          return;
+        }
+        // After AI pass, if it's still AI's turn (shouldn't happen, but safety)
+        if (game.current_turn() === 2) {
+          setThinking(false);
+          setTimeout(() => doAiMove(), 300);
+          return;
         }
       }
       setThinking(false);
@@ -146,8 +166,8 @@ export function useReversiEngine(): ReversiEngine {
       return;
     }
 
-    // If AI mode and now it's AI's turn
-    if (mode === 'ai') {
+    // If AI mode and it's now the AI's turn (White = 2), trigger AI
+    if (mode === 'ai' && game.current_turn() === 2) {
       doAiMove();
     }
   }, [thinking, syncState, mode, doAiMove]);
