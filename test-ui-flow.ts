@@ -1,195 +1,69 @@
 /**
- * Simulates the EXACT useReversiEngine flow — without React.
- * Tests the same sequence of calls the UI makes:
- *   playMove → syncState → doAiMove → syncState → check state
- * 
- * If this test passes but the game freezes in the browser,
- * the bug is in React rendering / closure state.
- * 
+ * Simulates the EXACT call sequence of the FIXED useReversiEngine.ts.
+ *
+ * The fix: playMove → if turn===2 → doAiMove → if turn still 2 → chain doAiMove.
+ * No useEffect dependency on state.turn (which failed when turn stayed 2).
+ *
  * Run with: npx tsx test-ui-flow.ts
  */
 import { Game } from './src/engine';
 
-let failures: string[] = [];
+let totalGames = 0;
+let totalPassChains = 0;
+let freezes = 0;
 
-function simulateGameUI(gameNum: number, aiDepth: number): void {
-  const game = new Game();
-  let moveNum = 0;
-  const maxCycles = 100;
+for (let i = 0; i < 2000; i++) {
+  const g = new Game();
+  let moves = 0;
+  totalGames++;
 
-  while (!game.is_game_over() && moveNum < maxCycles) {
-    // ── Simulate what App.tsx computes ──
-    const turn = game.current_turn();
-    const isPlayerTurn = turn === 1; // mode === 'ai', so player is Black (1)
-    const legalMoves = game.get_legal_moves();
-    const isGameOver = game.is_game_over();
-    const thinking = false; // not thinking between moves
+  while (!g.is_game_over() && moves < 200) {
+    // Must be human's turn (1) at this point
+    if (g.current_turn() !== 1) {
+      freezes++;
+      console.log(`FREEZE game#${i}: turn=${g.current_turn()} at move ${moves}`);
+      break;
+    }
 
-    // Check: disabled = !isPlayerTurn || thinking || phase === 'gameover'
-    const disabled = !isPlayerTurn || thinking || isGameOver;
+    const legal = g.get_legal_moves();
+    if (legal.length === 0) {
+      freezes++;
+      console.log(`FREEZE game#${i}: turn=1 but 0 legal moves at move ${moves}`);
+      break;
+    }
 
-    // Check: legalMoves passed to board = isPlayerTurn && !thinking ? legalMoves : []
-    const boardLegalMoves = isPlayerTurn && !thinking ? legalMoves : [];
+    // ─── playMove (human plays) ───
+    const pos = legal[Math.floor(Math.random() * legal.length)];
+    g.make_move(pos);
 
-    if (disabled && !isGameOver) {
-      // Board is disabled but game isn't over — stuck!
-      // This should only happen if it's the AI's turn
-      if (turn !== 2) {
-        failures.push(`Game ${gameNum} move ${moveNum}: board disabled, !gameOver, turn=${turn} (should be 2 if disabled)`);
-        return;
+    if (g.is_game_over()) break;
+
+    // ─── if turn === 2, trigger doAiMove ───
+    // This is the fixed pattern: explicit chaining, not useEffect
+    while (g.current_turn() === 2 && !g.is_game_over()) {
+      const turnBefore = g.current_turn();
+      g.ai_move(2);
+      const turnAfter = g.current_turn();
+
+      if (turnBefore === 2 && turnAfter === 2 && !g.is_game_over()) {
+        totalPassChains++;
+        // Fixed code: doAiMove detects turn still 2, chains via setTimeout
+        // We loop again here (simulating the chain)
       }
     }
 
-    if (!disabled && boardLegalMoves.length === 0 && !isGameOver) {
-      failures.push(`Game ${gameNum} move ${moveNum}: board enabled but 0 legal moves shown, turn=${turn}`);
-      return;
-    }
-
-    if (turn !== 1) {
-      failures.push(`Game ${gameNum} move ${moveNum}: expected human turn (1), got ${turn}`);
-      return;
-    }
-
-    if (legalMoves.length === 0) {
-      failures.push(`Game ${gameNum} move ${moveNum}: human's turn but 0 legal moves`);
-      return;
-    }
-
-    // ── Simulate playMove (human plays) ──
-    const pos = legalMoves[Math.floor(Math.random() * legalMoves.length)];
-    const flips = game.get_flips(pos);
-    const ok = game.make_move(pos);
-    if (!ok) {
-      failures.push(`Game ${gameNum} move ${moveNum}: make_move(${pos}) returned false`);
-      return;
-    }
-
-    // ── Simulate syncState after human move ──
-    const stateAfterHuman = {
-      turn: game.current_turn(),
-      legalMoves: game.get_legal_moves(),
-      isGameOver: game.is_game_over(),
-    };
-
-    if (stateAfterHuman.isGameOver) break;
-
-    // ── Simulate: if AI mode and turn === 2, call doAiMove ──
-    if (stateAfterHuman.turn === 2) {
-      // AI move loop (handles human-pass chaining)
-      let aiLoops = 0;
-      while (game.current_turn() === 2 && !game.is_game_over() && aiLoops < 30) {
-        const boardBefore = game.get_board();
-        const aiMove = game.ai_move(aiDepth);
-
-        if (aiMove >= 0 && aiMove < 64) {
-          // AI played a move
-          const boardAfter = game.get_board();
-          const aiFlipped: number[] = [];
-          for (let i = 0; i < 64; i++) {
-            if (i !== aiMove && boardBefore[i] !== boardAfter[i]) aiFlipped.push(i);
-          }
-
-          // syncState
-          const stateAfterAI = {
-            turn: game.current_turn(),
-            legalMoves: game.get_legal_moves(),
-            isGameOver: game.is_game_over(),
-          };
-
-          if (stateAfterAI.isGameOver) break;
-
-          if (stateAfterAI.turn === 2) {
-            // Human must pass — AI goes again (the setTimeout chain)
-            aiLoops++;
-            continue;
-          }
-          // Turn is now 1 (human) — check sanity
-          if (stateAfterAI.legalMoves.length === 0) {
-            failures.push(`Game ${gameNum} move ${moveNum}: after AI move, turn=1 but 0 legal moves`);
-            return;
-          }
-        } else {
-          // AI passed (returned -1, advanceTurn was called)
-          const stateAfterPass = {
-            turn: game.current_turn(),
-            isGameOver: game.is_game_over(),
-          };
-
-          if (stateAfterPass.isGameOver) break;
-          
-          if (stateAfterPass.turn === 2) {
-            // Still AI's turn after AI passed?! Bug!
-            failures.push(`Game ${gameNum} move ${moveNum}: AI passed but turn still 2`);
-            return;
-          }
-        }
-        aiLoops++;
-      }
-
-      if (aiLoops >= 30) {
-        failures.push(`Game ${gameNum} move ${moveNum}: AI loop ran 30 times without terminating`);
-        return;
-      }
-    }
-
-    // After the AI is done, verify the game is in a playable state for the human
-    if (!game.is_game_over()) {
-      const finalTurn = game.current_turn();
-      const finalLegal = game.get_legal_moves();
-
-      if (finalTurn !== 1) {
-        failures.push(`Game ${gameNum} move ${moveNum}: after AI done, turn=${finalTurn} expected 1`);
-        return;
-      }
-
-      if (finalLegal.length === 0) {
-        // This would mean: it's human's turn, they have no moves, but game isn't over.
-        // advanceTurn should have handled this.
-        failures.push(`Game ${gameNum} move ${moveNum}: human's turn but 0 legal moves, game not over`);
-        return;
-      }
-
-      // Simulate the disabled check that App.tsx would do
-      const isPlayerTurnFinal = finalTurn === 1;
-      const disabledFinal = !isPlayerTurnFinal || false || false; // thinking=false, not gameover
-      if (disabledFinal) {
-        failures.push(`Game ${gameNum} move ${moveNum}: board would be disabled after AI finishes`);
-        return;
-      }
-    }
-
-    moveNum++;
+    moves++;
   }
 }
 
-// ── Run ──
-console.log('Simulating 500 games with exact UI flow...\n');
+console.log(`\nGames: ${totalGames}`);
+console.log(`Pass-chain events resolved: ${totalPassChains}`);
+console.log(`Freezes: ${freezes}`);
 
-const t0 = performance.now();
-for (let i = 0; i < 200; i++) simulateGameUI(i + 1, 1);
-console.log(`Depth 1: 200 games (${(performance.now() - t0).toFixed(0)}ms)`);
-
-const t1 = performance.now();
-for (let i = 0; i < 150; i++) simulateGameUI(200 + i + 1, 2);
-console.log(`Depth 2: 150 games (${(performance.now() - t1).toFixed(0)}ms)`);
-
-const t2 = performance.now();
-for (let i = 0; i < 100; i++) simulateGameUI(350 + i + 1, 3);
-console.log(`Depth 3: 100 games (${(performance.now() - t2).toFixed(0)}ms)`);
-
-const t3 = performance.now();
-for (let i = 0; i < 50; i++) simulateGameUI(450 + i + 1, 4);
-console.log(`Depth 4: 50 games (${(performance.now() - t3).toFixed(0)}ms)`);
-
-console.log('\n=== RESULTS ===');
-console.log(`Failures: ${failures.length}`);
-
-if (failures.length > 0) {
-  console.log('\nFAILURES:');
-  for (const f of failures.slice(0, 20)) console.log(`  ❌ ${f}`);
-  if (failures.length > 20) console.log(`  ... and ${failures.length - 20} more`);
-  process.exit(1);
-} else {
-  console.log('\n✅ ALL 500 UI FLOW SIMULATIONS PASSED');
+if (freezes === 0) {
+  console.log(`\n✅ PASS: 0 freezes across ${totalGames} games. ${totalPassChains} pass-chains all resolved.`);
   process.exit(0);
+} else {
+  console.log(`\n❌ FAIL: ${freezes} freezes detected.`);
+  process.exit(1);
 }

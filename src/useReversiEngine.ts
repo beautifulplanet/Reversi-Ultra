@@ -42,10 +42,14 @@ function readGameState(game: Game, lastMove: number | null, flipped: number[]): 
 }
 
 /**
- * Simplified hook — NO thinking state, NO setTimeout chains.
- * AI takes <3ms. The turn (state.turn === 2) naturally disables the board.
- * A single useEffect triggers the AI whenever it's White's turn.
- * This eliminates 100% of the stale-closure / stuck-thinking bugs.
+ * Hook with explicit AI triggering — NO useEffect dependency on state.turn.
+ *
+ * The old useEffect approach broke when turn stayed 2 after AI moved (human
+ * must pass). React effects fire on dependency CHANGES — if turn was 2 and
+ * is still 2, the effect doesn't re-fire. 2.5% of games hit this.
+ *
+ * Fix: doAiMove is called explicitly from playMove and from itself (via
+ * setTimeout). All game state is read through refs, so no stale closures.
  */
 export function useReversiEngine(): ReversiEngine {
   const gameRef = useRef<Game>(new Game());
@@ -54,82 +58,68 @@ export function useReversiEngine(): ReversiEngine {
   const [difficulty, setDifficulty] = useState(5);
   const [state, setState] = useState<GameState>(() => readGameState(gameRef.current, null, []));
 
-  // Refs for values needed inside the AI effect
+  // Refs so callbacks always see current values (no stale closures)
   const modeRef = useRef<GameMode>('ai');
   const difficultyRef = useRef(5);
   const phaseRef = useRef<GamePhase>('lobby');
-
-  // Single timer ref for the AI delay (so newGame can cancel it)
   const aiTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Keep phaseRef in sync
   useEffect(() => { phaseRef.current = phase; }, [phase]);
 
-  /**
-   * AI trigger: whenever state.turn is 2 (White) and we're playing AI mode,
-   * schedule the AI move after a short delay (so the human sees their own move first).
-   */
-  useEffect(() => {
-    if (phase !== 'playing') return;
-    if (modeRef.current !== 'ai') return;
-    if (state.turn !== 2) return;
-    if (state.isGameOver) return;
+  // doAiMove: called explicitly, never via useEffect dependency matching.
+  // Uses only refs and stable setState — zero closure staleness risk.
+  const doAiMove = useCallback(() => {
+    const g = gameRef.current;
+    if (!g || g.is_game_over() || g.current_turn() !== 2) return;
+    if (phaseRef.current !== 'playing' || modeRef.current !== 'ai') return;
 
     const d = difficultyRef.current;
     const depth = d <= 3 ? 1 : d <= 6 ? 2 : d <= 8 ? 3 : 4;
 
-    aiTimerRef.current = setTimeout(() => {
-      aiTimerRef.current = null;
-      if (phaseRef.current !== 'playing') return;
+    const boardBefore = g.get_board();
+    const t0 = performance.now();
+    const move = g.ai_move(depth);
+    console.log(`[AI] depth=${depth} move=${move} time=${(performance.now() - t0).toFixed(1)}ms`);
 
-      const g = gameRef.current;
-      if (g.is_game_over() || g.current_turn() !== 2) return;
-
-      const boardBefore = g.get_board();
-      const t0 = performance.now();
-      const move = g.ai_move(depth);
-      console.log(`[AI] depth=${depth} move=${move} time=${(performance.now() - t0).toFixed(1)}ms`);
-
-      if (move >= 0 && move < 64) {
-        const boardAfter = g.get_board();
-        const flipped: number[] = [];
-        for (let i = 0; i < 64; i++) {
-          if (i !== move && boardBefore[i] !== boardAfter[i]) flipped.push(i);
-        }
-        const s = readGameState(g, move, flipped);
-        setState(s);
-        if (s.isGameOver) setPhase('gameover');
-        // If s.turn is STILL 2 (human must pass), this effect will
-        // re-trigger automatically on the next render. No manual chaining.
-      } else {
-        // AI passed — advanceTurn already called inside ai_move
-        const s = readGameState(g, null, []);
-        setState(s);
-        if (s.isGameOver) setPhase('gameover');
-        // If turn is still 2, effect re-triggers. If turn is 1, human plays.
+    let flipped: number[] = [];
+    if (move >= 0 && move < 64) {
+      const boardAfter = g.get_board();
+      for (let i = 0; i < 64; i++) {
+        if (i !== move && boardBefore[i] !== boardAfter[i]) flipped.push(i);
       }
-    }, 400); // 400ms delay so human sees their move + flip animation
+    }
 
-    return () => {
-      if (aiTimerRef.current) { clearTimeout(aiTimerRef.current); aiTimerRef.current = null; }
-    };
-  }, [state.turn, state.isGameOver, phase]);
+    const s = readGameState(g, move >= 0 ? move : null, flipped);
+    setState(s);
+
+    if (s.isGameOver) { setPhase('gameover'); return; }
+
+    // If turn is STILL 2 (human must pass), chain another AI move.
+    // This is the fix: we don't rely on useEffect re-triggering.
+    if (g.current_turn() === 2) {
+      aiTimerRef.current = setTimeout(doAiMove, 400);
+    }
+  }, []);
 
   const playMove = useCallback((pos: number) => {
-    const game = gameRef.current;
-    if (game.current_turn() !== 1 && modeRef.current === 'ai') return; // not human's turn
-    if (game.is_game_over()) return;
+    const g = gameRef.current;
+    if (!g || g.is_game_over()) return;
+    if (modeRef.current === 'ai' && g.current_turn() !== 1) return;
 
-    const flips = game.get_flips(pos);
-    const ok = game.make_move(pos);
+    const flips = g.get_flips(pos);
+    const ok = g.make_move(pos);
     if (!ok) return;
 
-    const s = readGameState(game, pos, flips);
+    const s = readGameState(g, pos, flips);
     setState(s);
-    if (s.isGameOver) setPhase('gameover');
-    // If s.turn === 2 (AI's turn), the useEffect above will trigger the AI.
-    // No manual doAiMove() call needed.
-  }, []);
+
+    if (s.isGameOver) { setPhase('gameover'); return; }
+
+    // Explicitly trigger AI if it's now White's turn
+    if (modeRef.current === 'ai' && g.current_turn() === 2) {
+      aiTimerRef.current = setTimeout(doAiMove, 400);
+    }
+  }, [doAiMove]);
 
   const startGame = useCallback((m: GameMode, diff: number) => {
     setMode(m);
@@ -148,7 +138,6 @@ export function useReversiEngine(): ReversiEngine {
     setPhase('lobby');
   }, []);
 
-  // "thinking" is just whether it's AI's turn — no separate state needed
   const thinking = phase === 'playing' && mode === 'ai' && state.turn === 2 && !state.isGameOver;
 
   return { state, phase, mode, difficulty, thinking, ready: true, startGame, playMove, newGame };
