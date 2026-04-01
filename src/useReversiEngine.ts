@@ -52,6 +52,9 @@ export function useReversiEngine(): ReversiEngine {
   const [mode, setMode] = useState<GameMode>('ai');
   const [difficulty, setDifficulty] = useState(5);
   const [thinking, setThinking] = useState(false);
+  const thinkingRef = useRef(false);
+  const modeRef = useRef<GameMode>('ai');
+  const difficultyRef = useRef(5);
   const [state, setState] = useState<GameState>({
     board: Array(64).fill(0) as CellState[],
     turn: 1,
@@ -63,6 +66,11 @@ export function useReversiEngine(): ReversiEngine {
     flippedDiscs: [],
   });
 
+  // Keep refs in sync with state
+  useEffect(() => { thinkingRef.current = thinking; }, [thinking]);
+  useEffect(() => { modeRef.current = mode; }, [mode]);
+  useEffect(() => { difficultyRef.current = difficulty; }, [difficulty]);
+
   // Initialize WASM
   useEffect(() => {
     init().then(() => {
@@ -70,6 +78,8 @@ export function useReversiEngine(): ReversiEngine {
       gameRef.current = game;
       setState(readGameState(game, null, []));
       setReady(true);
+    }).catch((err) => {
+      console.error('WASM init failed:', err);
     });
   }, []);
 
@@ -83,15 +93,18 @@ export function useReversiEngine(): ReversiEngine {
   const startGame = useCallback((m: GameMode, diff: number) => {
     if (!gameRef.current) return;
     setMode(m);
+    modeRef.current = m;
     setDifficulty(diff);
+    difficultyRef.current = diff;
     gameRef.current.reset();
     setState(readGameState(gameRef.current, null, []));
     setPhase('playing');
   }, []);
 
   const doAiMove = useCallback(() => {
-    if (!gameRef.current) return;
     const game = gameRef.current;
+    if (!game) return;
+
     if (game.is_game_over()) {
       setPhase('gameover');
       return;
@@ -100,53 +113,64 @@ export function useReversiEngine(): ReversiEngine {
     // Only proceed if it's actually the AI's turn (White = 2)
     if (game.current_turn() !== 2) return;
 
-    // Map difficulty 1-10 to depth 1-8
-    const depth = Math.min(8, Math.max(1, Math.ceil(difficulty * 0.8)));
+    // Don't double-fire
+    if (thinkingRef.current) return;
+
+    // Read depth from ref (always current, no stale closure)
+    const depth = Math.min(8, Math.max(1, Math.ceil(difficultyRef.current * 0.8)));
     setThinking(true);
+    thinkingRef.current = true;
+
     setTimeout(() => {
-      const boardBefore = Array.from(game.get_board());
-      const move = game.ai_move(depth);
-      if (move >= 0 && move < 64) {
-        const boardAfter = Array.from(game.get_board());
-        const flipped: number[] = [];
-        for (let i = 0; i < 64; i++) {
-          if (i !== move && boardBefore[i] !== boardAfter[i]) {
-            flipped.push(i);
+      try {
+        const boardBefore = Array.from(game.get_board());
+        const move = game.ai_move(depth);
+
+        if (move >= 0 && move < 64) {
+          const boardAfter = Array.from(game.get_board());
+          const flipped: number[] = [];
+          for (let i = 0; i < 64; i++) {
+            if (i !== move && boardBefore[i] !== boardAfter[i]) {
+              flipped.push(i);
+            }
+          }
+          const s = syncState(move, flipped);
+
+          if (s && s.isGameOver) {
+            setPhase('gameover');
+            setThinking(false);
+            thinkingRef.current = false;
+            return;
+          }
+
+          // Human must pass → chain another AI move after animation delay
+          if (game.current_turn() === 2) {
+            setThinking(false);
+            thinkingRef.current = false;
+            setTimeout(() => doAiMove(), 300);
+            return;
+          }
+        } else {
+          // AI had no move (pass)
+          syncState(null, []);
+          if (game.is_game_over()) {
+            setPhase('gameover');
+            setThinking(false);
+            thinkingRef.current = false;
+            return;
           }
         }
-        const s = syncState(move, flipped);
-        if (s && s.isGameOver) {
-          setPhase('gameover');
-          setThinking(false);
-          return;
-        }
-        // After AI moves, if human must pass (turn is still White), chain AI again
-        if (game.current_turn() === 2) {
-          setThinking(false);
-          setTimeout(() => doAiMove(), 300); // small delay so flip animation plays
-          return;
-        }
-      } else {
-        // AI had no move (pass) — sync and check
-        syncState(null, []);
-        if (game.is_game_over()) {
-          setPhase('gameover');
-          setThinking(false);
-          return;
-        }
-        // After AI pass, if it's still AI's turn (shouldn't happen, but safety)
-        if (game.current_turn() === 2) {
-          setThinking(false);
-          setTimeout(() => doAiMove(), 300);
-          return;
-        }
+      } catch (err) {
+        console.error('AI move failed:', err);
       }
+
       setThinking(false);
+      thinkingRef.current = false;
     }, 50);
-  }, [difficulty, syncState]);
+  }, [syncState]);
 
   const playMove = useCallback((pos: number) => {
-    if (!gameRef.current || thinking) return;
+    if (!gameRef.current || thinkingRef.current) return;
     const game = gameRef.current;
     const boardBefore = Array.from(game.get_board());
     const ok = game.make_move(pos);
@@ -167,10 +191,10 @@ export function useReversiEngine(): ReversiEngine {
     }
 
     // If AI mode and it's now the AI's turn (White = 2), trigger AI
-    if (mode === 'ai' && game.current_turn() === 2) {
+    if (modeRef.current === 'ai' && game.current_turn() === 2) {
       doAiMove();
     }
-  }, [thinking, syncState, mode, doAiMove]);
+  }, [syncState, doAiMove]);
 
   const newGame = useCallback(() => {
     if (!gameRef.current) return;
@@ -178,6 +202,7 @@ export function useReversiEngine(): ReversiEngine {
     setState(readGameState(gameRef.current, null, []));
     setPhase('lobby');
     setThinking(false);
+    thinkingRef.current = false;
   }, []);
 
   return { state, phase, mode, difficulty, thinking, ready, startGame, playMove, newGame };
