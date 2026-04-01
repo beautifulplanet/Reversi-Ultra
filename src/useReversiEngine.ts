@@ -52,6 +52,7 @@ export function useReversiEngine(): ReversiEngine {
   const thinkingRef = useRef(false);
   const modeRef = useRef<GameMode>('ai');
   const difficultyRef = useRef(5);
+  const aiTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const syncState = useCallback((lastMove: number | null, flipped: number[]) => {
     const s = readGameState(gameRef.current, lastMove, flipped);
@@ -65,45 +66,49 @@ export function useReversiEngine(): ReversiEngine {
     if (game.is_game_over()) { setPhase('gameover'); return; }
     if (game.current_turn() !== 2) return;
 
-    // Node budget (30K) guarantees completion regardless of depth
     const d = difficultyRef.current;
-    const depth = d <= 3 ? 2 : d <= 6 ? 3 : d <= 8 ? 4 : 5;
-    setThinking(true);
+    const depth = d <= 3 ? 1 : d <= 6 ? 2 : d <= 8 ? 3 : 4;
     thinkingRef.current = true;
+    setThinking(true);
 
-    setTimeout(() => {
+    aiTimerRef.current = setTimeout(() => {
+      aiTimerRef.current = null;
       const g = gameRef.current;
-      const boardBefore = g.get_board();
-      const t0 = performance.now();
-      const move = g.ai_move(depth);
-      console.log(`[AI] depth=${depth} move=${move} time=${(performance.now() - t0).toFixed(1)}ms`);
 
-      if (move >= 0 && move < 64) {
-        const boardAfter = g.get_board();
-        const flipped: number[] = [];
-        for (let i = 0; i < 64; i++) {
-          if (i !== move && boardBefore[i] !== boardAfter[i]) flipped.push(i);
+      try {
+        const boardBefore = g.get_board();
+        const t0 = performance.now();
+        const move = g.ai_move(depth);
+        console.log(`[AI] depth=${depth} move=${move} time=${(performance.now() - t0).toFixed(1)}ms`);
+
+        if (move >= 0 && move < 64) {
+          const boardAfter = g.get_board();
+          const flipped: number[] = [];
+          for (let i = 0; i < 64; i++) {
+            if (i !== move && boardBefore[i] !== boardAfter[i]) flipped.push(i);
+          }
+          const s = syncState(move, flipped);
+
+          if (s.isGameOver) {
+            setPhase('gameover');
+          } else if (g.current_turn() === 2) {
+            // Human must pass — AI goes again after short delay
+            thinkingRef.current = false;
+            setThinking(false);
+            aiTimerRef.current = setTimeout(() => doAiMove(), 300);
+            return;
+          }
+        } else {
+          // AI passed (returned -1 but advanceTurn was called inside ai_move)
+          syncState(null, []);
+          if (g.is_game_over()) setPhase('gameover');
         }
-        const s = syncState(move, flipped);
-        if (s.isGameOver) {
-          setPhase('gameover');
-          setThinking(false);
-          thinkingRef.current = false;
-          return;
-        }
-        if (g.current_turn() === 2) {
-          setThinking(false);
-          thinkingRef.current = false;
-          setTimeout(() => doAiMove(), 300);
-          return;
-        }
-      } else {
-        syncState(null, []);
-        if (g.is_game_over()) setPhase('gameover');
+      } catch (err) {
+        console.error('[AI] error:', err);
       }
 
-      setThinking(false);
       thinkingRef.current = false;
+      setThinking(false);
     }, 50);
   }, [syncState]);
 
@@ -111,17 +116,12 @@ export function useReversiEngine(): ReversiEngine {
     if (thinkingRef.current) return;
     const game = gameRef.current;
 
-    const boardBefore = game.get_board();
+    // Get flips BEFORE making the move (for animation)
+    const flips = game.get_flips(pos);
     const ok = game.make_move(pos);
     if (!ok) return;
 
-    const boardAfter = game.get_board();
-    const flipped: number[] = [];
-    for (let i = 0; i < 64; i++) {
-      if (i !== pos && boardBefore[i] !== boardAfter[i]) flipped.push(i);
-    }
-
-    const s = syncState(pos, flipped);
+    const s = syncState(pos, flips);
     if (s.isGameOver) { setPhase('gameover'); return; }
 
     if (modeRef.current === 'ai' && game.current_turn() === 2) {
@@ -140,6 +140,8 @@ export function useReversiEngine(): ReversiEngine {
   }, []);
 
   const newGame = useCallback(() => {
+    // Cancel any pending AI timeout
+    if (aiTimerRef.current) { clearTimeout(aiTimerRef.current); aiTimerRef.current = null; }
     gameRef.current.reset();
     setState(readGameState(gameRef.current, null, []));
     setPhase('lobby');
