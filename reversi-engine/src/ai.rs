@@ -482,4 +482,126 @@ mod tests {
         assert_eq!(score, 42);
         assert_eq!(best, 19);
     }
+
+    /// Stress test: play 500 full games using AI vs AI at various depths.
+    /// This catches any panic/crash in move generation, flipping, or evaluation.
+    #[test]
+    fn test_stress_full_games() {
+        for game_num in 0..500 {
+            let mut board = Board::new();
+            let mut current = Color::Black;
+            let depth = (game_num % 4) as u8 + 1; // depths 1-4
+            let mut move_count = 0u32;
+            let mut consecutive_passes = 0u8;
+
+            loop {
+                let moves = board.legal_moves(current);
+                if moves == 0 {
+                    consecutive_passes += 1;
+                    if consecutive_passes >= 2 {
+                        break; // game over
+                    }
+                    current = current.opponent();
+                    continue;
+                }
+                consecutive_passes = 0;
+
+                // Use best_move for some games, direct move for others
+                let pos = if game_num % 3 == 0 {
+                    // AI picks
+                    best_move(&board, current, depth)
+                        .expect(&format!("best_move returned None with legal moves! game={} move={}", game_num, move_count))
+                } else {
+                    // Pick a deterministic move based on game state (simulates variety)
+                    let seed = (game_num as u64).wrapping_mul(31).wrapping_add(move_count as u64);
+                    let move_list: Vec<u8> = crate::utils::iter_bits(moves).collect();
+                    move_list[(seed as usize) % move_list.len()]
+                };
+
+                // Verify the move is actually legal
+                assert!(has_bit(moves, pos),
+                    "best_move returned illegal pos={} game={} move={}", pos, game_num, move_count);
+
+                // Verify get_flips agrees with legal_moves
+                let flips = board.get_flips(pos, current);
+                assert!(flips != 0,
+                    "get_flips returned 0 for legal pos={} game={} move={}", pos, game_num, move_count);
+
+                // Apply the move
+                let new_board = board.apply_move(pos, current);
+
+                // Verify the piece was placed
+                assert!(has_bit(new_board.board_for(current), pos),
+                    "piece not placed at pos={} game={} move={}", pos, game_num, move_count);
+
+                // Verify flipped pieces changed color
+                for flip_pos in crate::utils::iter_bits(flips) {
+                    assert!(has_bit(new_board.board_for(current), flip_pos),
+                        "flip not applied at pos={} game={} move={}", flip_pos, game_num, move_count);
+                    assert!(!has_bit(new_board.opponent_board(current), flip_pos),
+                        "opponent piece not removed at pos={} game={} move={}", flip_pos, game_num, move_count);
+                }
+
+                board = new_board;
+                current = if board.has_moves(current.opponent()) {
+                    current.opponent()
+                } else {
+                    current // opponent passes
+                };
+                move_count += 1;
+
+                // Safety: Reversi can't exceed 60 moves
+                assert!(move_count <= 60,
+                    "game exceeded 60 moves! game={}", game_num);
+            }
+
+            // Game ended — verify it's actually over
+            assert!(board.legal_moves(Color::Black) == 0 && board.legal_moves(Color::White) == 0,
+                "game ended but moves exist! game={}", game_num);
+        }
+    }
+
+    /// Test that legal_moves and get_flips always agree:
+    /// every bit in legal_moves must have non-zero get_flips, and vice versa.
+    #[test]
+    fn test_legal_moves_matches_get_flips() {
+        // Play 200 games and check at every board state
+        for game_num in 0..200 {
+            let mut board = Board::new();
+            let mut current = Color::Black;
+
+            for move_num in 0..60 {
+                // Check BOTH colors at this board state
+                for &color in &[Color::Black, Color::White] {
+                    let legal = board.legal_moves(color);
+                    for pos in 0..64u8 {
+                        let is_legal = has_bit(legal, pos);
+                        let flips = board.get_flips(pos, color);
+                        let has_flips = flips != 0;
+                        assert_eq!(is_legal, has_flips,
+                            "legal_moves vs get_flips mismatch! pos={} color={:?} legal={} flips={} game={} move={}",
+                            pos, color, is_legal, has_flips, game_num, move_num);
+                    }
+                }
+
+                let moves = board.legal_moves(current);
+                if moves == 0 {
+                    if !board.has_moves(current.opponent()) { break; }
+                    current = current.opponent();
+                    continue;
+                }
+
+                // Pick deterministic move
+                let move_list: Vec<u8> = crate::utils::iter_bits(moves).collect();
+                let seed = (game_num as u64).wrapping_mul(7).wrapping_add(move_num as u64);
+                let pos = move_list[(seed as usize) % move_list.len()];
+                board = board.apply_move(pos, current);
+                current = if board.has_moves(current.opponent()) {
+                    current.opponent()
+                } else {
+                    current
+                };
+            }
+        }
+    }
 }
